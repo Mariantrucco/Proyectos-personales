@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
+import { supabase } from './supabaseClient'
 
 function App() {
   const [currentMonth, setCurrentMonth] = useState(() => {
@@ -9,6 +10,12 @@ function App() {
   const [activities, setActivities] = useState({})
   const [selectedDate, setSelectedDate] = useState(null)
   const [activityText, setActivityText] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
+  const [syncError, setSyncError] = useState(null)
+  const [isLoadingMonth, setIsLoadingMonth] = useState(false)
+
+  const isSyncEnabled = Boolean(supabase)
+  const tableName = 'calendar_entries'
 
   const monthLabel = useMemo(
     () =>
@@ -70,7 +77,53 @@ function App() {
     setActivityText('')
   }
 
-  const handleSubmit = (event) => {
+  const fetchMonthActivities = useCallback(
+    async (monthDate) => {
+      if (!isSyncEnabled) {
+        return
+      }
+
+      setIsLoadingMonth(true)
+      setSyncError(null)
+      const year = monthDate.getFullYear()
+      const month = monthDate.getMonth()
+      const startKey = formatDateKey(new Date(year, month, 1))
+      const endKey = formatDateKey(new Date(year, month + 1, 0))
+
+      const { data, error } = await supabase
+        .from(tableName)
+        .select('date, entries')
+        .gte('date', startKey)
+        .lte('date', endKey)
+
+      if (error) {
+        setSyncError('No se pudieron sincronizar las actividades. Intenta nuevamente.')
+        setIsLoadingMonth(false)
+        return
+      }
+
+      setActivities((prev) => {
+        const updated = { ...prev }
+        data.forEach(({ date, entries }) => {
+          updated[date] = Array.isArray(entries) ? entries : []
+        })
+        return updated
+      })
+
+      setIsLoadingMonth(false)
+    },
+    [isSyncEnabled],
+  )
+
+  useEffect(() => {
+    if (!isSyncEnabled) {
+      return
+    }
+
+    fetchMonthActivities(currentMonth)
+  }, [currentMonth, fetchMonthActivities, isSyncEnabled])
+
+  const handleSubmit = async (event) => {
     event.preventDefault()
     if (!selectedDate) {
       return
@@ -82,10 +135,32 @@ function App() {
       .map((line) => line.trim())
       .filter(Boolean)
 
-    setActivities((prev) => ({
-      ...prev,
-      [key]: entries,
-    }))
+    setActivities((prev) => {
+      const next = { ...prev }
+      if (entries.length === 0) {
+        delete next[key]
+      } else {
+        next[key] = entries
+      }
+      return next
+    })
+
+    if (isSyncEnabled) {
+      setIsSaving(true)
+      setSyncError(null)
+
+      const { error } =
+        entries.length === 0
+          ? await supabase.from(tableName).delete().eq('date', key)
+          : await supabase
+              .from(tableName)
+              .upsert({ date: key, entries, updated_at: new Date().toISOString() })
+
+      if (error) {
+        setSyncError('No se pudo guardar en la nube. Tus cambios solo vivirán localmente.')
+      }
+      setIsSaving(false)
+    }
 
     if (entries.length === 0) {
       handleCloseModal()
@@ -153,6 +228,21 @@ function App() {
         Haz clic en un día para agregar o editar actividades. Puedes escribir varias líneas y se
         guardarán como actividades separadas.
       </p>
+
+      {!isSyncEnabled && (
+        <p className="calendar-hint warning">
+          La sincronización entre dispositivos está desactivada. Agrega tus claves de Supabase en el
+          archivo <code>.env</code> para habilitarla.
+        </p>
+      )}
+
+      {isSyncEnabled && (
+        <div className="calendar-sync">
+          {isLoadingMonth && <span>Cargando actividades guardadas…</span>}
+          {isSaving && <span>Guardando cambios…</span>}
+          {syncError && <span className="error">{syncError}</span>}
+        </div>
+      )}
 
       {selectedDate && (
         <div className="modal-backdrop" onClick={handleCloseModal}>
